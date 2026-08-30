@@ -1,6 +1,7 @@
 #include "stm32f446xx.h"
 
-#define SLAVE_OWN_ADDR 0x50 // 0x28 shifted left by 1
+// 0x28 is the 7-bit address. Shifted left by 1.
+#define SLAVE_OWN_ADDR 0x50 
 
 volatile uint8_t blink_active = 0;
 
@@ -9,9 +10,12 @@ void delay_ms(uint32_t ms) {
 }
 
 void LED_Init(void) {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN; // Enable GPIOA clock
-    GPIOA->MODER &= ~(3 << 10);          // Clear mode for PA5
-    GPIOA->MODER |= (1 << 10);           // Set PA5 to General Purpose Output (01)
+    // Enable clock for GPIOA
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN; 
+    
+    // Set PA5 (Green LED LD2) to General Purpose Output (01)
+    GPIOA->MODER &= ~(3 << 10);          
+    GPIOA->MODER |= (1 << 10);           
 }
 
 void I2C1_Slave_Init(void) {
@@ -28,7 +32,7 @@ void I2C1_Slave_Init(void) {
     GPIOB->AFR[1] &= ~((0xF << 0) | (0xF << 4)); 
     GPIOB->AFR[1] |= ((4 << 0) | (4 << 4));      
 
-    // 3. Configure I2C1 Peripheral for Slave Mode
+    // 3. Configure I2C1 Peripheral
     I2C1->CR1 |= I2C_CR1_SWRST;   
     I2C1->CR1 &= ~I2C_CR1_SWRST;  
 
@@ -36,42 +40,50 @@ void I2C1_Slave_Init(void) {
     I2C1->CCR = 80; 
     I2C1->TRISE = 17; 
 
-    // Set Slave Address. Bit 14 must always be kept at 1 by software in OAR1.
+    // 4. Set Slave Address
+    // Bit 14 MUST always be kept at 1 by software in OAR1 register
     I2C1->OAR1 = (1 << 14) | SLAVE_OWN_ADDR;
 
+    // 5. Enable Interrupts
     // Enable I2C Event Interrupts and Buffer Interrupts
     I2C1->CR2 |= I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN;
-    NVIC_EnableIRQ(I2C1_EV_IRQn); // Enable IRQ 31 in the Cortex-M4 NVIC
+    
+    // Enable IRQ 31 in the Cortex-M4 NVIC (Nested Vectored Interrupt Controller)
+    NVIC_EnableIRQ(I2C1_EV_IRQn); 
 
-    I2C1->CR1 |= I2C_CR1_ACK; // Enable Acknowledgement
-    I2C1->CR1 |= I2C_CR1_PE;  // Enable I2C1
+    // 6. Enable I2C peripheral and Acknowledgement
+    I2C1->CR1 |= I2C_CR1_ACK; 
+    I2C1->CR1 |= I2C_CR1_PE;  
 }
 
-// Bare Metal Interrupt Handler for I2C1 Events
+// -------------------------------------------------------------
+// HARDWARE INTERRUPT HANDLER FOR I2C1
+// This runs automatically whenever the master sends data
+// -------------------------------------------------------------
 void I2C1_EV_IRQHandler(void) {
     uint16_t sr1 = I2C1->SR1;
 
-    // 1. Address Matched flag
+    // A) Check if our Address matched
     if (sr1 & I2C_SR1_ADDR) {
-        // Clear ADDR flag by reading SR1 (done above) then SR2
+        // Clear ADDR flag by reading SR1 (done above), then SR2
         (void)I2C1->SR2; 
     }
     
-    // 2. Data Register Not Empty flag (Data received)
+    // B) Check if Data Register has received a byte
     if (sr1 & I2C_SR1_RXNE) {
-        uint8_t received_cmd = I2C1->DR; // Reading DR clears RXNE flag
+        uint8_t received_cmd = I2C1->DR; // Reading DR clears the RXNE flag
         
         if (received_cmd == 0x01) {
-            blink_active = 1; // Start
+            blink_active = 1; // Master said START
         } 
         else if (received_cmd == 0x02) {
-            blink_active = 0; // Stop
+            blink_active = 0; // Master said STOP
         }
     }
     
-    // 3. Stop condition detected flag
+    // C) Check if Master sent a STOP condition
     if (sr1 & I2C_SR1_STOPF) {
-        // Clear STOPF by reading SR1 (done above), then writing to CR1
+        // Clear STOPF flag by reading SR1 (done above), then writing to CR1
         I2C1->CR1 |= I2C_CR1_PE; 
     }
 }
@@ -81,11 +93,14 @@ int main(void) {
     I2C1_Slave_Init();
 
     while (1) {
-        if (blink_active) {
-            GPIOA->ODR ^= (1 << 5); // Toggle PA5 using Output Data Register
+        if (blink_active == 1) {
+            // Toggle PA5 using the Output Data Register
+            GPIOA->ODR ^= (1 << 5); 
             delay_ms(200); 
         } else {
-            GPIOA->BSRR = (1 << (5 + 16)); // Use Bit Set/Reset Register to turn off PA5 instantly
+            // Use Bit Set/Reset Register to instantly turn off PA5
+            // Shifting by 21 (5 + 16) targets the reset bit for Pin 5
+            GPIOA->BSRR = (1 << 21); 
         }
     }
 }
