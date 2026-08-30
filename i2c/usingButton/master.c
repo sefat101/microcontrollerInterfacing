@@ -1,74 +1,92 @@
-#include "stm32f4xx_hal.h"
+#include "stm32f446xx.h"
 
-#define SLAVE_ADDR 0x28 << 1 // 7-bit address shifted left for HAL
+#define SLAVE_ADDR_WRITE 0x50 // 0x28 shifted left by 1 for Write mode
 
-I2C_HandleTypeDef hi2c1;
+// Rough delay function for 16 MHz clock
+void delay_ms(uint32_t ms) {
+    for (volatile uint32_t i = 0; i < (ms * 1600); i++);
+}
 
-void SystemClock_Config(void);
-void MX_GPIO_Init(void);
-void MX_I2C1_Init(void);
+void I2C1_Init(void) {
+    // 1. Enable Clocks
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN; // Enable GPIOB clock
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;  // Enable I2C1 clock
+
+    // 2. Configure PB8 (SCL) and PB9 (SDA) for Alternate Function
+    GPIOB->MODER &= ~((3 << 16) | (3 << 18)); // Clear mode for PB8, PB9
+    GPIOB->MODER |= ((2 << 16) | (2 << 18));  // Set to Alternate Function mode (10)
+    
+    GPIOB->OTYPER |= ((1 << 8) | (1 << 9));   // Set to Open Drain
+    GPIOB->OSPEEDR |= ((3 << 16) | (3 << 18));// Very High Speed
+    GPIOB->PUPDR &= ~((3 << 16) | (3 << 18)); // No internal pull-up (using external)
+
+    // Set Alternate Function 4 (I2C1) for PB8 and PB9
+    GPIOB->AFR[1] &= ~((0xF << 0) | (0xF << 4)); // Clear AFR bits
+    GPIOB->AFR[1] |= ((4 << 0) | (4 << 4));      // Set AF4 (0100)
+
+    // 3. Configure I2C1 Peripheral
+    I2C1->CR1 |= I2C_CR1_SWRST;   // Reset I2C
+    I2C1->CR1 &= ~I2C_CR1_SWRST;  // Release reset
+
+    // Clock config for 100 kHz Standard Mode based on 16 MHz APB1 clock
+    I2C1->CR2 = 16;               // APB1 freq is 16 MHz
+    I2C1->CCR = 80;               // Thigh = Tlow = 5000ns. 5000ns / 62.5ns = 80
+    I2C1->TRISE = 17;             // Max rise time 1000ns. (1000ns / 62.5ns) + 1 = 17
+
+    I2C1->CR1 |= I2C_CR1_PE;      // Enable I2C1
+}
+
+void Button_Init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN; // Enable GPIOC clock
+    GPIOC->MODER &= ~(3 << 26);          // PC13 as Input (00)
+}
+
+void I2C_SendCmd(uint8_t command) {
+    // Wait until bus is not busy
+    while(I2C1->SR2 & I2C_SR2_BUSY);
+
+    // Generate START condition
+    I2C1->CR1 |= I2C_CR1_START;
+    while(!(I2C1->SR1 & I2C_SR1_SB)); // Wait for Start Bit flag
+
+    // Send Slave Address + Write bit
+    I2C1->DR = SLAVE_ADDR_WRITE;
+    while(!(I2C1->SR1 & I2C_SR1_ADDR)); // Wait for Address matched flag
+    (void)I2C1->SR1; (void)I2C1->SR2;   // Clear ADDR flag by reading SR1 then SR2
+
+    // Send Command Data
+    I2C1->DR = command;
+    while(!(I2C1->SR1 & I2C_SR1_TXE));  // Wait for Tx buffer empty
+
+    // Generate STOP condition
+    I2C1->CR1 |= I2C_CR1_STOP;
+}
 
 int main(void) {
-    HAL_Init();
-    SystemClock_Config();
-    MX_GPIO_Init();
-    MX_I2C1_Init();
+    I2C1_Init();
+    Button_Init();
 
-    uint8_t command = 0x01; // Command to toggle LED
+    uint8_t toggle_state = 0; // 0 = stopped, 1 = blinking
 
     while (1) {
-        // Check if the blue button (PC13) is pressed (active low on Nucleo boards)
-        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {
+        // Check if button is pressed (active low)
+        if (!(GPIOC->IDR & (1 << 13))) {
+            delay_ms(50); // Debounce
             
-            // Send the command byte to the slave
-            HAL_I2C_Master_Transmit(&hi2c1, SLAVE_ADDR, &command, 1, HAL_MAX_DELAY);
-            
-            // Simple debounce delay
-            HAL_Delay(300); 
+            if (!(GPIOC->IDR & (1 << 13))) { // Still pressed
+                
+                toggle_state ^= 1; // Flip between 0 and 1
+                
+                if (toggle_state) {
+                    I2C_SendCmd(0x01); // Send Start command
+                } else {
+                    I2C_SendCmd(0x02); // Send Stop command
+                }
+
+                // Wait for button release
+                while (!(GPIOC->IDR & (1 << 13))); 
+                delay_ms(50); // Debounce release
+            }
         }
     }
-}
-
-void MX_I2C1_Init(void) {
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_I2C1_CLK_ENABLE();
-
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    
-    // Configure PB8 (SCL) and PB9 (SDA) for I2C1
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;      // Open-Drain is required for I2C
-    GPIO_InitStruct.Pull = GPIO_NOPULL;          // External pull-ups should be used
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    hi2c1.Instance = I2C1;
-    hi2c1.Init.ClockSpeed = 100000;              // 100 kHz Standard Mode
-    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-    hi2c1.Init.OwnAddress1 = 0;
-    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-    hi2c1.Init.OwnAddress2 = 0;
-    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-    
-    HAL_I2C_Init(&hi2c1);
-}
-
-void MX_GPIO_Init(void) {
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    // Configure PC13 for the Blue User Button
-    GPIO_InitStruct.Pin = GPIO_PIN_13;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-}
-
-// Basic clock initialization (adjust if using a specific external crystal)
-void SystemClock_Config(void) {
-    // Default clock config provided by HAL for 16MHz internal oscillator
 }
